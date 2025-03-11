@@ -115,7 +115,7 @@ def calculate_S2 (optimal_quantiles,p_obs,dam_price, ida_price,exc_price,def_pri
     exc_s, exc_s1, def_b, def_b1 = 0,0,0,0
     down_cap, up_cap, down_sr, up_sr, curt = 0,0,0,0,0
     prog = 0
-    
+
     dam_rem = optimal_quantiles * dam_price
     
     dev = ida_forecast - optimal_quantiles ## Deviation hours before delivery
@@ -341,7 +341,7 @@ def calculate_S2 (optimal_quantiles,p_obs,dam_price, ida_price,exc_price,def_pri
                         total_rev = dam_rem + idc_rem + dev_rem
           
                
-    return total_rev, ida_s, ida_s1, ida_b, ida_b1,idc_s, idc_s1, idc_b, idc_b1, exc_s, exc_s1, def_b, def_b1, down_cap, up_cap, down_sr, up_sr, curt        
+    return total_rev, ida_s, ida_s1, ida_b, ida_b1,idc_s, idc_s1, idc_b, idc_b1, exc_s, exc_s1, def_b, def_b1, down_cap, up_cap, down_sr, up_sr, curt
 
 # Iterate through each time step 
 for i in range(len(p_obs)):
@@ -374,6 +374,7 @@ for i in range(len(p_obs)):
     sr_down[i] = down_sr
     curtail[i] = curt
     
+    
 # Average Remuneration
 print(f'Avg Remuneration S2:{np.sum(total_revenue) / np.sum(p_obs):.2f} €/MWh')
 
@@ -385,6 +386,7 @@ def calculate_S3 (optimal_quantiles,p_obs,dam_price, ida_price,exc_price,def_pri
     idc_s, idc_s1, idc_b, idc_b1 = 0,0,0,0
     exc_s, exc_s1, def_b, def_b1 = 0,0,0,0
     down_cap, up_cap, down_sr, up_sr, curt = 0,0,0,0,0
+  
     
     dam_rem = optimal_quantiles * dam_price
     
@@ -404,7 +406,7 @@ def calculate_S3 (optimal_quantiles,p_obs,dam_price, ida_price,exc_price,def_pri
                     down_cap = min(prog, afrr_ndown, dev3/2)
                     up_cap = min(afrr_nup, down_cap*2)
                     cap_rem = (up_cap * afrr_price) + (down_cap * afrr_price)
-                    down_co = afrr_downused - afrr_ndown
+                    down_co = afrr_ndown - down_cap
                     
                     if up_cap < dev3:
                         idc_s1 = max(0, dev3 - up_cap)
@@ -513,7 +515,7 @@ def calculate_S3 (optimal_quantiles,p_obs,dam_price, ida_price,exc_price,def_pri
                     down_cap = min(prog, afrr_ndown, dev2/2)
                     up_cap = min(afrr_nup, down_cap*2)
                     cap_rem = (up_cap * afrr_price) + (down_cap * afrr_price)
-                    down_co = afrr_downused - afrr_ndown
+                    down_co = afrr_ndown - down_cap
                     
                     if up_cap < dev2:
                         idc_s1 = max(0, dev2 - up_cap)
@@ -626,7 +628,7 @@ def calculate_S3 (optimal_quantiles,p_obs,dam_price, ida_price,exc_price,def_pri
                     down_cap = min(prog, afrr_ndown, dev2/2)
                     up_cap = min(afrr_nup, down_cap*2)
                     cap_rem = (up_cap * afrr_price) + (down_cap * afrr_price)
-                    down_co = afrr_downused - afrr_ndown
+                    down_co = afrr_ndown - down_cap
                     
                     if up_cap < dev2:
                         idc_s1 = max(0, dev2 - up_cap)
@@ -729,7 +731,7 @@ def calculate_S3 (optimal_quantiles,p_obs,dam_price, ida_price,exc_price,def_pri
                 total_rev = dam_rem + idc_rem + dev_rem
           
                
-    return total_rev, ida_s, ida_s1, ida_b, ida_b1,idc_s, idc_s1, idc_b, idc_b1, exc_s, exc_s1, def_b, def_b1, down_cap, up_cap, down_sr, up_sr, curt        
+    return total_rev, ida_s, ida_s1, ida_b, ida_b1,idc_s, idc_s1, idc_b, idc_b1, exc_s, exc_s1, def_b, def_b1, down_cap, up_cap, down_sr, up_sr, curt 
 
 
 
@@ -763,6 +765,7 @@ for i in range(len(p_obs)):
     sr_up[i] = up_sr
     sr_down[i] = down_sr
     curtail[i] = curt
+
     
 # Average Remuneration
 print(f'Avg Remuneration S3: {np.sum(total_revenue) / np.sum(p_obs):.2f} €/MWh')
