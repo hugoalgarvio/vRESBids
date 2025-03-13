@@ -32,8 +32,6 @@ excess = df.iloc[:,39].values  ## Positive Imbalance Price for BSP
 ## Constants
 min_bid = 0.1  ### Minimum bid size
 cap_nom = 250  ### Nominal Capacity of Wind Power Plant
-epsilon = 1e-12 ## Small threshold to handle floating-point precision errors
-
 
 ### Wind Data
 p_obs = df.iloc[:, 1].values ## Observed Power
@@ -76,8 +74,6 @@ exc_sell1 = np.zeros_like(p_obs, dtype=float) ## Positive Imbalance in IS for BS
 def_buy1 = np.zeros_like(p_obs, dtype=float) ## Negative Imbalance in IS for BSP
 
 total_revenue = np.zeros_like(p_obs, dtype=float) ## Total Revenue 
-final_balance = np.zeros_like(p_obs, dtype=float)
-
 #%% Participation only in DAM
 
 def calculate_dam(deviation: np.ndarray, quantiles: np.ndarray, dam_price: float, exc_price: float, def_price: float) -> tuple:
@@ -162,16 +158,17 @@ for i in range(len(p_obs)):
 # Avera Remuneration
 print(f'Avg Remuneration DAM+IDM: {np.sum(total_revenue) / np.sum(p_obs):.2f} €/MWh')
 
-
-
-#%% Participation in Secondary Reserve
-    
+#%% Participation in SR 
 def calculate_sr(deviation,quantiles,p_obs,dam_price, ida_price,exc_price,def_price, afrr_price, afrr_nup, afrr_ndown,afrr_upused, afrr_downused, trup_price, trdown_price,excess,deficit):
   
     sr_upcap, sr_downcap, sr_up, sr_down, sr_downcap_others = 0,0,0,0,0
     exc_sell1, ida_sell1, exc_sell, ida_sell = 0,0,0,0
     def_buy1, ida_buy1, def_buy, ida_buy, curtail = 0,0,0,0,0
-    final_balance = 0
+    down_revenue, up_revenue, up_en, down_en  = 0,0,0,0
+    curt_up, curt_down = 0,0
+    ida_up, ida_down = 0,0
+    exc_up, exc_down = 0,0
+    def_up, def_down = 0,0
     
     dam_rem = quantiles * dam_price
     
@@ -180,237 +177,216 @@ def calculate_sr(deviation,quantiles,p_obs,dam_price, ida_price,exc_price,def_pr
         ida_sell_rem = deviation * ida_price
         dev_rem = deviation * exc_price
         
-        if afrr_nup > 0 and deviation > min_bid: ## Participation in SR is possible
-
+        if afrr_nup > min_bid and deviation > min_bid: ## Participation in SR is possible
             ###################################################################            
             if afrr_upused > 0 and afrr_downused == 0:
+                # Capacity Market
                 sr_upcap = min(afrr_nup, deviation)
                 sr_downcap = min(afrr_ndown, sr_upcap/2)
-                cap_rem = (sr_upcap*afrr_price) + (sr_downcap * afrr_price)
+                cap_rem = (sr_upcap * afrr_price) + (sr_downcap * afrr_price)
+                # Activation of Energy Bids
                 sr_up = min(afrr_upused, sr_upcap)
                 en_rem = sr_up * trup_price
                 remaining_dev = deviation - sr_up
                 ### Sell remaining deviation to highest price 
-                
                 if ida_price > excess:
-                    ## Quantity to sell in IDA limited by available capacity and
-                    ## Nominal capacity of wind power plant
-                    
-                    ida_sell1 = min(cap_nom - quantiles - sr_upcap, remaining_dev)
+                    ## Quantity to sell in IDA limited by available capacity
+                    position = quantiles + sr_upcap
+                    available_capacity = cap_nom - position
+                    ida_sell1 = min(available_capacity, remaining_dev)
                     ida_rem = ida_sell1 * ida_price
-                    remaining_dev = deviation - sr_up - ida_sell1
+                    # Imbalance Settlement
+                    final_schedule = quantiles + sr_up + ida_sell1
+                    final_deviation = p_obs - final_schedule
                     if excess > 0:
-                        exc_sell1 = remaining_dev
+                        exc_sell1 = final_deviation
                         exc_rem = exc_sell1 * excess
-                        mix_rem = cap_rem + en_rem + ida_rem + exc_rem
-                        final_balance = p_obs - quantiles - sr_up - ida_sell1 - exc_sell1
+                        sr_rem = cap_rem + en_rem + ida_rem + exc_rem
                     else:
-                        curtail = remaining_dev
-                        mix_rem = cap_rem + en_rem + ida_rem
-                        final_balance = p_obs - quantiles - sr_up - ida_sell1 - curtail
+                        curtail = final_deviation
+                        sr_rem = cap_rem + en_rem + ida_rem
                 else:
-                    exc_sell1 = remaining_dev
+                    final_schedule = quantiles + sr_up
+                    final_deviation = p_obs - final_schedule
+                    exc_sell1 = final_deviation
                     exc_rem = exc_sell1 * excess
-                    mix_rem = cap_rem + en_rem + exc_rem
-                    final_balance = p_obs - quantiles - sr_up  - exc_sell1
+                    sr_rem = cap_rem + en_rem + exc_rem
                     
             ######################################################################                    
             elif afrr_upused == 0 and afrr_downused > 0:
-               
+                # Capacity Market
                 sr_upcap = min(afrr_nup, deviation)
                 sr_downcap = min(afrr_ndown, sr_upcap/2)
                 cap_rem = (sr_upcap*afrr_price) + (sr_downcap * afrr_price)
-                
-                ### Downward capacity needs covered by other producers
-                sr_downcap_others = max(0, afrr_ndown - sr_downcap)
-                
+                sr_downcap_others =  afrr_ndown - sr_downcap # Down needs covered by other producers 
                 ### Downward activation required from WPP
                 down_req = min(max(0,afrr_downused- sr_downcap_others), sr_downcap)
                 
-               
                 ### If the required activation is higher than scheduled injection
                 if down_req > quantiles:
-                    
-                    ## Sell more quantity in IDA to increase position/scheduled injection
+                    ## Sell more quantity in IDA to increase position/schedule
                     ida_sell1 = min(cap_nom - quantiles - sr_upcap, down_req - quantiles)
-                    
-                    ## If is not possible to comply with activation of downward reserve 
-                    ## There's no participation in reserve for quantile j
-                    if ida_sell1 + quantiles < down_req:
-                        ida_sell1 = 0
-                        mix_rem = 0
-                        
-                    ### Activation of down SR bis
-                    else:
+                    ida_rem = ida_sell1 * ida_price
+                    if ida_sell1 + quantiles < down_req:# If still not possible to comply with activation of downward reserve 
+                        ### Limit capacity offer to the schedule
+                        sr_downcap = min(afrr_ndown, deviation/2, quantiles)
+                        sr_upcap = min(sr_downcap*2, deviation, afrr_nup)
+                        cap_rem = (sr_upcap * afrr_price) + (sr_downcap * afrr_price)
+                        down_req = min(max(0,afrr_downused- sr_downcap_others), sr_downcap)
+                        sr_down = down_req
+                        en_rem = - down_req * trdown_price
+                        final_schedule = quantiles - down_req
+                        if ida_price > excess:
+                            remaining_capacity = cap_nom - quantiles - sr_upcap 
+                            ida_sell1 = min(remaining_capacity, final_schedule)
+                            ida_rem = ida_sell1 * ida_price
+                            final_schedule = quantiles + ida_sell1 - sr_down
+                            final_deviation = p_obs - final_schedule
+                            if excess > 0:
+                                final_deviation = p_obs - final_schedule
+                                exc_sell1 = final_deviation
+                                exc_rem = exc_sell1 * excess
+                                sr_rem = cap_rem + ida_rem + en_rem + exc_rem
+                            else:
+                                curtail = final_deviation
+                                sr_rem = cap_rem + ida_rem +  en_rem
+                        else:
+                            final_deviation = p_obs - final_schedule
+                            exc_sell1 = final_deviation
+                            exc_rem = exc_sell1 * excess
+                            sr_rem = cap_rem + en_rem + exc_rem
+           
+                    else: ## After making adjustments in IDA. 
                         sr_down = down_req
                         en_rem = -sr_down * trdown_price
-                        ida_rem = ida_sell1 * ida_price
-                        remaining_dev = deviation - ida_sell1 + sr_down
-                            
+                        final_schedule = quantiles + ida_sell1 - sr_down 
+                        final_deviation = p_obs - final_schedule
                         if excess > 0:
-                            exc_sell1 = remaining_dev
+                            exc_sell1 = final_deviation
                             exc_rem = exc_sell1 * excess
-                            mix_rem = cap_rem + en_rem + ida_rem + exc_rem
-                            
-                            final_balance = p_obs - quantiles - ida_sell1 - exc_sell1 + sr_down
+                            sr_rem = cap_rem + en_rem + ida_rem + exc_rem
                        
                         else: ##for negative prices, remaining energy is curtailed
-                            curtail = remaining_dev
-                            mix_rem = cap_rem + en_rem + ida_rem
-                            final_balance = p_obs - quantiles - ida_sell1 - curtail + sr_down
+                            curtail = final_deviation
+                            sr_rem = cap_rem + en_rem + ida_rem
               
-                else: ## Activation of down SR 
+                else: ## Activation of initial offer
                     sr_down = down_req
                     en_rem = -sr_down * trdown_price
-                    remaining_dev = deviation + sr_down
-                    
-                    if ida_price > excess:
+                    if ida_price > excess: # Adjustments in IDA
                         ida_sell1 = min(cap_nom - quantiles - sr_upcap, deviation - sr_down)
                         ida_rem = ida_sell1 * ida_price
-                        remaining_dev = deviation - ida_sell1 + sr_down
+                        final_schedule = quantiles + ida_sell1 - sr_down
+                        final_deviation = p_obs - final_schedule
                         if excess > 0:
-                           
-                            exc_sell1 = remaining_dev
+                            exc_sell1 = final_deviation
                             exc_rem = exc_sell1 * excess
-                            mix_rem = cap_rem + en_rem + ida_rem + exc_rem
-                            final_balance = p_obs - quantiles - ida_sell1 - exc_sell1 + sr_down
+                            sr_rem = cap_rem + en_rem + ida_rem + exc_rem
                         else:
-                     
-                            curtail = remaining_dev
-                            mix_rem = cap_rem + en_rem + ida_rem
-                            final_balance = p_obs - quantiles - ida_sell1 - curtail + sr_down
-                            
+                            curtail = final_deviation
+                            sr_rem = cap_rem + en_rem + ida_rem
                     else:
-                        exc_sell1 = remaining_dev
+                        final_schedule = quantiles - sr_down
+                        final_deviation = p_obs - final_schedule
+                        exc_sell1 = final_deviation
                         exc_rem = exc_sell1 * excess
-                        mix_rem = cap_rem + en_rem + exc_rem
-                        final_balance = p_obs - quantiles - exc_sell1 + sr_down
+                        sr_rem = cap_rem + en_rem + exc_rem
                    
             ###################################################################
-                        
             elif afrr_upused > 0 and afrr_downused > 0:
-                ### Energy used in both direction in the same hour
+                ### Energy used in both direction in the same hour. Check which direction yields higher revenue
                 
+                ## Capacity Market
                 sr_upcap = min(afrr_nup, deviation)
                 sr_downcap = min(afrr_ndown, sr_upcap/2)
-                cap_rem = (sr_upcap*afrr_price) + (sr_downcap * afrr_price)
-                sr_downcap_others = max(0, afrr_ndown - sr_downcap)
+                cap_rem = (sr_upcap * afrr_price) + (sr_downcap * afrr_price)
+                sr_downcap_others =  afrr_ndown - sr_downcap
                 down_req = min(max(0,afrr_downused- sr_downcap_others), sr_downcap)
-                sr_up = min(afrr_upused, sr_upcap)
-                
-                
-                if sr_up > (down_req*2): 
-                ## If required activation of UP SR is higher than half the allocated UP cap. (allocated Down)
-                ## Activation only in UP direction 
+            
+                ## Option 1: Upward Regulation 
+                up_en = min(afrr_upused, sr_upcap) 
+                en_up = up_en * trup_price 
+                if ida_price > excess: # Make adjustments in IDA
+                    available_capacity = cap_nom - quantiles - sr_upcap
+                    remaining_deviation = p_obs - quantiles - up_en
+                    ida_up = min(available_capacity, remaining_deviation)
+                    ida_rem = ida_up * ida_price
+                else:
+                    ida_up, ida_rem = 0,0
+                ## Imbalance Settlement
+                final_schedule = quantiles + ida_up + up_en
+                final_deviation_up = p_obs - final_schedule
+                if excess > 0:
+                    exc_up = final_deviation_up
+                    exc_rem = exc_up * excess
+                    up_revenue = cap_rem + en_up + ida_rem + exc_rem
+                else:
+                    curt_up = final_deviation_up
+                    up_revenue = cap_rem + en_up + ida_rem
+              
+                ## Option 2: Downward Regulation
+                down_en = down_req
+                en_down = - down_en * trdown_price
+                if ida_price > excess: # Make adjustments in IDA
+                    available_capacity = cap_nom - quantiles - sr_upcap
+                    remaining_deviation = p_obs - quantiles + down_en
+                    ida_down = min(available_capacity, remaining_deviation)
+                    ida_rem = ida_down * ida_price
+                else:
+                    ida_down, ida_rem = 0,0
+                ## Imbalance Settlement
+                final_schedule = quantiles + ida_down - down_en
+                final_deviation_down = p_obs - final_schedule
+                if excess > 0:
+                    exc_down = final_deviation_down
+                    exc_rem = exc_down * excess
+                    down_revenue = cap_rem + en_down + ida_rem + exc_rem
+                else:
+                    curt_down = final_deviation_down
+                    down_revenue = cap_rem + en_down + ida_rem
+      
+                ## Choose if Upward or Downward  
+                if up_revenue > down_revenue or down_req <= 0 or down_req > quantiles:
+                    ida_sell1 = ida_up
+                    curtail = curt_up
+                    exc_sell1 = exc_up
+                    sr_up = up_en
+                    sr_rem = up_revenue
+                else:
+                    ida_sell1 = ida_down
+                    curtail = curt_down
+                    exc_sell1 = exc_down
+                    sr_down = down_en
+                    sr_rem = down_revenue
                     
-                    en_rem = sr_up * trup_price
-                    remaining_dev = deviation - sr_up
-                    if ida_price > excess:
-                        ida_sell1 = min(cap_nom - quantiles - sr_upcap, remaining_dev)
-                        ida_rem = ida_sell1 * ida_price
-                        remaining_dev = deviation - sr_up - ida_sell1
-                        if excess > 0:
-                            exc_sell1 = remaining_dev
-                            exc_rem = exc_sell1 * excess
-                            mix_rem = cap_rem + en_rem + ida_rem + exc_rem
-                            final_balance = p_obs - quantiles - sr_up - ida_sell1 - exc_sell1 + sr_down
-                            
-                        else:
-                            curtail = remaining_dev
-                            mix_rem = cap_rem + en_rem + ida_rem
-                            final_balance = p_obs - quantiles - sr_up - ida_sell1 - curtail + sr_down
-                    else:
-                        exc_sell1 = remaining_dev
-                        exc_rem = exc_sell1 * excess
-                        mix_rem = cap_rem + en_rem + exc_rem
-                        final_balance = p_obs - quantiles - sr_up  - exc_sell1 + sr_down
-                        
-                else: ## Activation in both directions in 1h trading period.
-                       # 30min up and 30min down
-                    
-                    sr_down = down_req
-                    en_rem = (sr_up*trup_price) - (sr_down*trdown_price)
-                    
-                    if down_req > sr_up and down_req > 0: 
-                        ### During 0.5h can't lower more than the capacity UP in the other 0.5h
-                        ## To balance this, sell more in IDA to increase scheduled injection/position 
-                        ## See [18]
-                        
-                        ida_sell1 = min(cap_nom - quantiles - sr_upcap, deviation - (2 * sr_up))
-                        ida_rem = ida_sell1 * ida_price
-                        remaining_dev = deviation - sr_up - ida_sell1 + sr_down
-                        
-                        if excess > 0:
-                            exc_sell1 = remaining_dev
-                            exc_rem = exc_sell1 * excess
-                            mix_rem = cap_rem + en_rem + ida_rem +  exc_rem
-                            final_balance = p_obs - quantiles - sr_up  - ida_sell1 -  exc_sell1 + sr_down
-                            
-                        else:
-                            curtail = remaining_dev
-                            mix_rem = cap_rem + en_rem + ida_rem
-                            final_balance = p_obs - quantiles - sr_up - ida_sell1 - curtail + sr_down
-                       
-  
-                    else: 
-                       
-                        if ida_price > excess:
-                            ida_sell1 = min(cap_nom - quantiles - sr_upcap, deviation - (2 * sr_up))
-                            ida_rem = ida_sell1 * ida_price
-                            remaining_dev = deviation - sr_up - ida_sell1 + sr_down
-                            
-                            if excess > 0:
-                                exc_sell1 = remaining_dev
-                                exc_rem = exc_sell1 * excess
-                                mix_rem = cap_rem + en_rem + ida_rem +  exc_rem
-                                final_balance = p_obs - quantiles - sr_up  - ida_sell1 -  exc_sell1 + sr_down
-                                
-                            else:
-                                curtail = remaining_dev
-                                mix_rem = cap_rem + en_rem + ida_rem
-                                final_balance = p_obs - quantiles - sr_up - ida_sell1 - curtail + sr_down
-                        else:
-                            remaining_dev = deviation - sr_up + sr_down
-                            exc_sell1 = remaining_dev
-                            exc_rem = exc_sell1 * excess
-                            mix_rem = cap_rem + en_rem +  exc_rem
-                            final_balance = p_obs - quantiles - sr_up  - exc_sell1 + sr_down
-                            
-#####################################################################################
-                            
+###############################################################################
             else: ## No SR energy used 
-                
                 sr_upcap = min(afrr_nup, cap_nom - quantiles) 
                 sr_downcap = min(afrr_ndown, sr_upcap/2)
-                cap_rem = (sr_upcap*afrr_price) + (sr_downcap * afrr_price)
-        
+                cap_rem = (sr_upcap * afrr_price) + (sr_downcap * afrr_price)
                 if ida_price > excess:
-                    ida_sell1 = min(cap_nom - quantiles - sr_upcap, deviation)
+                    available_capacity = cap_nom - quantiles - sr_upcap
+                    ida_sell1 = min(available_capacity, deviation)
                     ida_rem = ida_sell1 * ida_price
-                    remaining_dev = deviation - ida_sell1
+                    final_schedule = quantiles + ida_sell1
+                    final_deviation = p_obs - final_schedule
                     if excess > 0:
-                        exc_sell1 = remaining_dev
+                        exc_sell1 = final_deviation
                         exc_rem = exc_sell1 * excess
-                        mix_rem = cap_rem + ida_rem +  exc_rem
-                        final_balance = p_obs - quantiles - ida_sell1  - exc_sell1 
-                        
+                        sr_rem = cap_rem + ida_rem +  exc_rem      
                     else:
-                        curtail = remaining_dev
-                        mix_rem = cap_rem +  ida_rem
-                        final_balance = p_obs - quantiles - ida_sell1  - curtail 
+                        curtail = final_deviation
+                        sr_rem = cap_rem +  ida_rem
                 else:
                     exc_sell1 = deviation
                     exc_rem = exc_sell1 * excess
-                    mix_rem = cap_rem +  exc_rem
-                    final_balance = p_obs - quantiles - exc_sell1 
-                    
-            
+                    sr_rem = cap_rem +  exc_rem
         else: ## No reserve in this hour
-            mix_rem = 0
+            sr_rem = 0
        
         total_revenue_ida = dam_rem + ida_sell_rem
         total_revenue_dev = dam_rem + dev_rem
-        total_revenue_mix = dam_rem + mix_rem
+        total_revenue_mix = dam_rem + sr_rem
             
         if total_revenue_ida >= total_revenue_dev and total_revenue_ida >= total_revenue_mix:
             ida_sell1, exc_sell1, exc_sell, sr_up, sr_down, sr_upcap, sr_downcap, curtail = 0,0,0,0,0,0,0,0
@@ -418,86 +394,118 @@ def calculate_sr(deviation,quantiles,p_obs,dam_price, ida_price,exc_price,def_pr
         elif (total_revenue_dev > total_revenue_ida) and (total_revenue_dev > total_revenue_mix):
             ida_sell1, exc_sell1, ida_sell, sr_up, sr_down, sr_upcap, sr_downcap, curtail = 0,0,0,0,0,0,0,0
             exc_sell = deviation
-                
-         
             
     else: ### Deficit
         
         ida_buy_rem = deviation * ida_price
         dev_rem = deviation * def_price
         
-        if afrr_ndown > 0 and abs(deviation) > min_bid :
-            
+        if afrr_ndown > min_bid and abs(deviation) > min_bid :
             if afrr_upused > 0 and afrr_downused == 0:
-                
+                # Capacity Market
                 sr_upcap = min(cap_nom - quantiles, afrr_nup)
                 sr_downcap = min(sr_upcap/2, afrr_ndown)
-                cap_rem = (sr_upcap*afrr_price) + (sr_downcap * afrr_price)
-                remaining_dev = deviation - min(sr_upcap, afrr_upused)
-                def_buy1 = abs(remaining_dev)
-                def_rem = - def_buy1 * deficit
-                mix_rem = cap_rem + def_rem
+                cap_rem = (sr_upcap * afrr_price) + (sr_downcap * afrr_price)
                 
-                final_balance = p_obs - quantiles + def_buy1 - (min(sr_upcap, afrr_upused))
+                # Real-time
+                up_req = min(afrr_upused, sr_upcap) ## TSO's request for UP regulation
+                final_schedule = quantiles + up_req
+                final_deviation = p_obs - final_schedule
+                
+                # Imbalance Settlement
+                def_buy1 = abs(final_deviation)
+                def_rem = - def_buy1 * deficit
+                sr_rem = cap_rem + def_rem
             
             elif afrr_upused == 0 and afrr_downused > 0: 
-                
-                ## Allocated downward capacity can't be higher than scheduled injection/available capacity
-                
-                if afrr_downused > p_obs:
-                    ## Only what can be activated 
-                    sr_downcap = min(max(0,afrr_ndown - afrr_downused), (cap_nom-quantiles)/2)
-                else:
-                    sr_downcap = min(p_obs, afrr_ndown, (cap_nom-quantiles)/2)
-                    
+                # Capacity Market
+                sr_downcap = min(quantiles, afrr_ndown, (cap_nom-quantiles)/2)
                 sr_upcap = min(sr_downcap*2, afrr_nup, cap_nom - quantiles)
                 cap_rem = (sr_upcap*afrr_price) + (sr_downcap * afrr_price)
-                    
-                sr_downcap_others = max(0, afrr_ndown - sr_downcap)
+                sr_downcap_others =  afrr_ndown - sr_downcap
                 
-                if max(0,afrr_downused - sr_downcap_others) < epsilon:
-                    ## Not required for downward activation
-                    sr_down = 0
-                    curtail = min(max(0,afrr_downused - sr_downcap_others), sr_downcap)
-                    
-                else:
-                    sr_down = min(max(0,afrr_downused - sr_downcap_others), sr_downcap)
-                    curtail = 0
-                    
+                # Real-time
+                down_req = min(sr_downcap, max(0, afrr_downused - sr_downcap_others))
+                sr_down = down_req
                 en_down_rem = - sr_down * trdown_price
-                remaining_dev =  max(0,p_obs - sr_down )- quantiles
-
-                def_buy1 = abs(remaining_dev)
-                def_rem = - def_buy1 * deficit
-                mix_rem = cap_rem + en_down_rem + def_rem
-                final_balance = p_obs - quantiles - sr_down + def_buy1 - curtail
+                
+                # Imbalance Settlement
+                final_schedule = quantiles - sr_down
+                final_deviation = p_obs - final_schedule
+                if final_deviation > 0:
+                    if excess > 0:
+                        exc_sell1 = final_deviation
+                        exc_rem = exc_sell1 * excess
+                        sr_rem = cap_rem + en_down_rem + exc_rem
+                    else:
+                        curtail = final_deviation
+                        sr_rem = cap_rem + en_down_rem 
+                else:
+                    def_buy1 = abs(final_deviation)
+                    def_rem = - def_buy1 * deficit
+                    sr_rem = cap_rem + en_down_rem + def_rem
                 
             elif afrr_upused == 0 and afrr_downused == 0:
                 sr_upcap = min(afrr_nup, cap_nom - quantiles)
                 sr_downcap = min(afrr_ndown, sr_upcap/2)
                 cap_rem = (sr_upcap*afrr_price) + (sr_downcap * afrr_price)
-               
                 if deficit < ida_price:
                     def_buy1 = abs(deviation)
                     def_rem = - def_buy1 * deficit
-                    mix_rem = cap_rem + def_rem
-                    final_balance = p_obs - quantiles + def_buy1
+                    sr_rem = cap_rem + def_rem
                 else:
                     ida_buy1 = abs(deviation)
                     ida_rem = - ida_buy1 * ida_price
-                    mix_rem = cap_rem + ida_rem
-                    final_balance = p_obs - quantiles + ida_buy1
+                    sr_rem = cap_rem + ida_rem
                     
-            else: ## Energy used in both directions. No participation in reserve.
-                mix_rem = float('-inf')
-                
+            else: ## Energy used in both directions. Check which direction yields higher revenue
+                ### Capacity Market
+                sr_downcap = min(quantiles, afrr_ndown, (cap_nom-quantiles)/2)
+                sr_upcap = min(sr_downcap*2, afrr_nup, cap_nom - quantiles)
+                cap_rem = (sr_upcap * afrr_price) + (sr_downcap * afrr_price)
+                sr_downcap_others =  afrr_ndown - sr_downcap
+                down_req = min(max(0,afrr_downused- sr_downcap_others), sr_downcap)
             
-        else: ## There is no reserve
-            mix_rem = float('-inf')
+                # Option 1: Upward Regulation ################################
+                up_req = min(afrr_upused, sr_upcap) ## TSO's request for UP regulation
+                final_schedule = quantiles + up_req
+                final_up = p_obs - final_schedule
+                def_up = abs(final_up)
+                def_rem = - def_up * deficit
+                up_revenue = cap_rem + def_rem
+                    
+                # Option 2: Downward Regulation ##############################
+                down_en = down_req
+                en_down = - down_en * trdown_price
+                final_schedule = quantiles - down_en
+                final_imbalance = p_obs - final_schedule
+                if final_imbalance > 0:
+                    if excess > 0:
+                        exc_sell1 = final_imbalance
+                        exc_rem = exc_sell1 * excess
+                        down_revenue = cap_rem + en_down  + exc_rem
+                    else:
+                        curtail = final_imbalance
+                        down_revenue = cap_rem + en_down 
+                else:
+                    def_down =  abs(final_imbalance)
+                    def_rem = - def_down * deficit
+                    down_revenue = cap_rem + en_down +  def_rem
+                ## Choose Upward or Downward   
+                if up_revenue > down_revenue or down_req <= 0: ## Upward Regulation
+                    def_buy1 = def_up
+                    sr_up = up_en
+                    sr_rem = up_revenue
+                else:
+                    def_buy1 = def_down
+                    sr_down = down_en
+                    sr_rem = down_revenue
+        else: ## No reserve needs.
+            sr_rem = float('-inf')
             
         total_revenue_ida = dam_rem + ida_buy_rem
         total_revenue_dev = dam_rem + dev_rem
-        total_revenue_mix = dam_rem + mix_rem
+        total_revenue_mix = dam_rem + sr_rem
             
         if (total_revenue_ida >= total_revenue_dev) and (total_revenue_ida >= total_revenue_mix):
             ida_buy1, def_buy1, def_buy, sr_down, sr_upcap, sr_up,sr_downcap,curtail = 0,0,0,0,0,0,0,0
@@ -506,12 +514,10 @@ def calculate_sr(deviation,quantiles,p_obs,dam_price, ida_price,exc_price,def_pr
             ida_buy1, def_buy1, ida_buy, sr_down, sr_upcap,sr_up, sr_downcap,curtail = 0,0,0,0,0,0,0,0
             def_buy = abs(deviation)
 
-
     total_revenue = max(total_revenue_ida, total_revenue_dev, total_revenue_mix)
         
-    return (total_revenue, sr_upcap, sr_downcap, sr_down, sr_up, def_buy1, ida_buy1, ida_buy, def_buy, curtail, exc_sell1, ida_sell1, ida_sell, exc_sell, final_balance)
+    return (total_revenue, sr_upcap, sr_downcap, sr_down, sr_up, def_buy1, ida_buy1, ida_buy, def_buy, curtail, exc_sell1, ida_sell1, ida_sell, exc_sell)
             
-
 # Iteration through time steps: Calculate optimal bids for each time step based on the revenues
 for i in range(len(p_obs)):
     
@@ -527,21 +533,16 @@ for i in range(len(p_obs)):
     ])
 
     optimal_index = np.argmax(revenues[:, 0]) # Select the quantile that maximizes revenue
-
-    # Store the optimal quantile for this time step
-    optimal_quantiles[i] = quantiles[i, optimal_index]
-    
-    # Store the header for the optimal quantile
-    optimal_quantiles_header[i] = quantiles_header[optimal_index]
+    optimal_quantiles[i] = quantiles[i, optimal_index] # Store the optimal quantile for this time step
+    optimal_quantiles_header[i] = quantiles_header[optimal_index] # Store the header for the optimal quantile
     
     # Store the revenue and the corresponding actions for the optimal quantile
     total_revenue[i], sr_upcap[i], sr_downcap[i], sr_down[i], sr_up[i], def_buy1[i],\
     ida_buy1[i], ida_buy[i], def_buy[i], curtail[i], exc_sell1[i], ida_sell1[i],\
-    ida_sell[i], exc_sell[i], final_balance[i]= revenues[optimal_index]
+    ida_sell[i], exc_sell[i] = revenues[optimal_index]
 
 # Average Remuneration
 print(f'Avg Remuneration SR: {np.sum(total_revenue) / np.sum(p_obs):.2f} €/MWh')
-
 #%% Participation in Tertiary Reserve
 
 # Function to calculate revenue and actions
